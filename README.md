@@ -1,3 +1,5 @@
+forked from https://github.com/socketteer/clooi
+
 ## IMPORTANT NOTE: IF YOU ARE USING CLooI TO TALK TO SYDNEY
 
 The default settings file is configured with a Copilot Pro cookie, but there is an hourly rate limit for user on the model. If you have your own Copilot Pro account, copy your own Copilot Pro cookie into bingAIClient.cookies. If it doesn't work, try replacing only the cookies that are different between the default cookies string and your cookies.

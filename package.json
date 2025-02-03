@@ -1,5 +1,5 @@
 {
-  "name": "@socketteer/clooi",
+  "name": "them-cli",
   "version": "0.9",
   "description": "Command Loom Interface.",
   "main": "index.js",

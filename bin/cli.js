@@ -1,4 +1,22 @@
-#!/usr/bin/env node
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import path from 'path';
+
+// Get the directory name of the current module
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Load environment variables from .env file
+// Look for .env in the project root directory
+dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
+
+// Debug log to verify API keys are loaded
+console.debug('API Keys loaded:', {
+    ANTHROPIC: process.env.ANTHROPIC_API_KEY ? '✓' : '✗',
+    OPENAI: process.env.OPENAI_API_KEY ? '✓' : '✗',
+});
+
 import fs from 'fs';
 import { pathToFileURL } from 'url';
 import { KeyvFile } from 'keyv-file';
@@ -146,7 +164,7 @@ async function loadSettings() {
             padding: 0, margin: 1, borderStyle: 'none', float: 'center',
         }));
     } else {
-        console.log(tryBoxen(`${getAILabel()} CLooI`, {
+        console.log(tryBoxen(`${getAILabel()} Them CLI`, {
             padding: 0.7, margin: 1, borderStyle: 'double', dimBorder: true,
         }));
     }
@@ -492,35 +510,39 @@ async function generateMessage() {
     const status = {};
     const eventLog = [];
 
+    // Make sure we pass all client options, including API keys
     const context = await client.yieldGenContext(
         null,
         {
+            ...client.modelOptions,  // Use client's model options
             ...clientOptions.modelOptions,
             ...(Object.keys(steeringFeatures) != 0 ? {
                 steering: {
                     feature_levels: steeringFeatures
                 }
-            } : {}),
+            } : {})
         },
         {
+            ...client.options,  // Include client's base options
             ...conversationData,
-            ...clientOptions.messageOptions,
-        },
+            ...clientOptions.messageOptions
+        }
     );
 
-    const {
-        apiParams,
-        conversationId,
-        completionParentId: parentMessageId,
-        conversation: _conversation,
+    if (!context) {
+        console.error('Failed to generate context');
+        return conversation();
+    }
+
+    const { 
+        apiParams, 
+        conversationId = crypto.randomUUID(), 
+        completionParentId: parentMessageId = crypto.randomUUID(),
+        conversation: _conversation = { messages: [] }
     } = context;
 
     localConversation = _conversation;
-
-    // console.log('apiParams', apiParams);
-    // console.log('modelOptions', clientOptions.modelOptions);
-    // console.log('messageOptions', clientOptions.messageOptions);
-
+    
     conversationData = {
         ...conversationData,
         parentMessageId,
@@ -528,12 +550,14 @@ async function generateMessage() {
     };
 
     const spinnerPrefix = `${getAILabel()} is typing...`;
-    const spinner = ora(spinnerPrefix);
-    spinner.prefixText = '\n   ';
+    const spinner = ora({
+        text: spinnerPrefix,
+        prefixText: ' ',
+    });
     spinner.start();
+
     try {
         const controller = new AbortController();
-        // abort on ctrl+c
         process.on('SIGINT', () => {
             controller.abort();
         });
@@ -550,131 +574,66 @@ async function generateMessage() {
                             status[idx] = 'streaming';
                         }
                         streamedMessages[idx] += diff;
+                        
+                        // Track event data
+                        eventLog.push({ type: 'stream', content: diff });
+                        
                         if (idx === previewIdx) {
-                            const output = aiMessageBox(replaceWhitespace(streamedMessages[idx].trim()));
-                            spinner.text = `${spinnerPrefix}\n${output}`;
+                            spinner.text = `${spinnerPrefix}\n${aiMessageBox(replaceWhitespace(streamedMessages[idx].trim()))}`;
                         }
                     }
-                    if (data) {
-                        eventLog.push(data);
-                    }
+                    
                     responseData = {
                         replies: streamedMessages,
                         eventLog,
                     };
                 },
                 onFinished: async (idx, data = {}, stopReason = null) => {
-                    // console.log('onFinished', idx, stopReason);
                     if (status[idx] === 'finished') {
-                        // console.log('already finished');
                         return null;
                     }
                     status[idx] = 'finished';
-                    let empty = false;
-                    if (!streamedMessages[idx]) {
-                        streamedMessages[idx] = '';
-                        empty = true;
-                    }
+                    
                     const simpleMessage = client.buildMessage(streamedMessages[idx].trim(), client.names.bot.author);
                     const conversationMessage = client.createConversationMessage(simpleMessage, parentMessageId, {
                         ...(data ? { details: data } : {}),
                         ...(stopReason ? { stopReason } : {}),
                     });
+                    
                     localConversation.messages.push(conversationMessage);
+                    
                     if (idx === previewIdx) {
-                        // await pullFromCache();
                         await client.conversationsCache.set(conversationId, localConversation);
-                        // localConversation = _conversation;
-                        // await pullFromCache();
-
-                        // remove event listeners
-
                         spinner.stop();
-                        if (empty) {
-                            return conversation();
-                        }
                         return selectMessage(conversationMessage.id, conversationId);
                     }
                     return null;
                 },
-            },
+            }
         );
 
         process.removeAllListeners('SIGINT');
-
         responseData.response = results;
 
-
-        if (!streamedMessages[previewIdx]) {
-            // console.log('not streaming');
-            // remove event listeners
-
-            spinner.stop();
-            const newConversationMessages = [];
-            let previewMessage;
-            for (const [key, text] of Object.entries(replies)) {
-                const simpleMessage = client.buildMessage(text.trim(), client.names.bot.author);
-                const conversationMessage = client.createConversationMessage(simpleMessage, parentMessageId);
-                if (parseInt(key, 10) === previewIdx) {
-                    previewMessage = conversationMessage;
-                }
-            }
-            localConversation.messages.push(...newConversationMessages);
-            await client.conversationsCache.set(conversationId, localConversation);
-            // await pullFromCache();
-
-            
-            return selectMessage(previewMessage.id, conversationId);
-        }
-
-        // await pullFromCache();
-        await client.conversationsCache.set(conversationId, localConversation);
-        // localConversation = _conversation;
-        // await pullFromCache();
-
-        // showHistory();
         return null;
     } catch (error) {
-
-
-        // remove event listeners
         process.removeAllListeners('SIGINT');
-    
         spinner.stop();
-        console.log(error);
-        if (streamedMessages && Object.keys(streamedMessages).length > 0) {
-            // console.log(streamedMessages);
-            const newConversationMessages = [];
-            let previewMessage;
-            for (const [key, text] of Object.entries(streamedMessages)) {
-                if (status[key] === 'streaming' && text.trim()) {
-                    const simpleMessage = client.buildMessage(text.trim(), client.names.bot.author);
-                    const conversationMessage = client.createConversationMessage(simpleMessage, parentMessageId, {
-                        stopReason: error,
-                    });
-                    if (parseInt(key, 10) === previewIdx) {
-                        previewMessage = conversationMessage;
-                    }
-                    newConversationMessages.push(conversationMessage);
-                }
-            }
-            if (newConversationMessages.length > 0) {
-                localConversation.messages.push(...newConversationMessages);
-                // await pullFromCache();
-                await client.conversationsCache.set(conversationId, localConversation);
-                // localConversation = localConversation;
-
-                if (previewMessage) {
-                    return selectMessage(previewMessage.id, conversationId);
-                }
-            }
-
-            return null;
+        console.error('Generation error:', error);
+        
+        if (streamedMessages[previewIdx] && status[previewIdx] === 'streaming') {
+            const simpleMessage = client.buildMessage(streamedMessages[previewIdx].trim(), client.names.bot.author);
+            const conversationMessage = client.createConversationMessage(simpleMessage, parentMessageId, {
+                stopReason: error
+            });
+            
+            localConversation.messages.push(conversationMessage);
+            await client.conversationsCache.set(conversationId, localConversation);
+            
+            return selectMessage(conversationMessage.id, conversationId);
         }
-        // throw error;
     }
-    // remove event listeners
-    process.removeAllListeners('SIGINT');
+    
     return conversation();
 }
 

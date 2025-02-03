@@ -12,7 +12,7 @@ const OLLAMA_PARTICIPANTS = {
 };
 
 const OLLAMA_DEFAULT_MODEL_OPTIONS = {
-    model: 'OpenHermes-2.5:Q5_K_M',
+    model: 'hermes3:8b',
     options: {
         // see PARAMS in ollama Modelfile docs
         num_ctx: 4096,
@@ -35,11 +35,94 @@ export default class OllamaClient extends ChatClient {
 
     setOptions(options) {
         super.setOptions(options);
-        // api key
+    }
+
+    onProgressIndexical(message, replies, idx, opts) {
+        if (message === '[DONE]') {
+            opts.onFinished(idx);
+            return;
+        }
+
+        if (message?.message?.content) {
+            if (!replies[idx]) {
+                replies[idx] = '';
+            }
+            replies[idx] += message.message.content;
+            opts.onProgress(message.message.content, idx);
+        }
+    }
+
+    async callAPI(params, options = {}) {
+        const replies = {};
+        const url = this.completionsUrl;
+        
+        const opts = {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                ...params,
+                ...this.modelOptions,
+            }),
+            signal: options.abortController.signal,
+        };
+
+        try {
+            const response = await fetch(url, opts);
+            const reader = response.body.getReader();
+            let done = false;
+
+            while (!done) {
+                const { value, done: readerDone } = await reader.read();
+                if (readerDone) {
+                    done = true;
+                    this.onProgressIndexical('[DONE]', replies, 0, options);
+                    continue;
+                }
+
+                const chunk = new TextDecoder().decode(value);
+                const lines = chunk.split('\n');
+
+                for (const line of lines) {
+                    if (line.trim() === '') continue;
+                    
+                    try {
+                        const data = JSON.parse(line);
+                        if (data.done) {
+                            done = true;
+                            this.onProgressIndexical('[DONE]', replies, 0, options);
+                        } else {
+                            this.onProgressIndexical(data, replies, 0, options);
+                        }
+                    } catch (e) {
+                        console.error('Error parsing chunk:', e);
+                    }
+                }
+            }
+
+            return {
+                results: {
+                    message: {
+                        id: crypto.randomUUID(),
+                        content: replies[0],
+                        role: 'assistant'
+                    }
+                },
+                replies
+            };
+
+        } catch (error) {
+            console.error('Error in callAPI:', error);
+            throw error;
+        }
     }
 
     async getCompletionStream(params, onProgress, abortController, debug = false) {
         const url = this.completionsUrl;
+        const messageId = crypto.randomUUID();
+        let fullMessage = '';
+        
         const opts = {
             method: 'POST',
             headers: {
@@ -56,7 +139,6 @@ export default class OllamaClient extends ChatClient {
             const response = await fetch(url, opts);
             const reader = response.body.getReader();
             let done = false;
-            let reply = '';
 
             while (!done) {
                 const { value, done: readerDone } = await reader.read();
@@ -64,22 +146,17 @@ export default class OllamaClient extends ChatClient {
                     done = true;
                 } else {
                     const chunk = new TextDecoder().decode(value);
-                    // console.log('Received chunk:', chunk);
                     const lines = chunk.split('\n');
 
                     for (const line of lines) {
-                        if (line.trim() === '') {
-                            continue;
-                        }
-
-                        // console.log('Processing line:', line);
-
+                        if (line.trim() === '') continue;
+                        
                         const data = JSON.parse(line);
                         if (data.done) {
                             done = true;
-                        } else if (data.message) {
-                            onProgress(data.message.content);
-                            reply += data.message.content;
+                        } else if (data.message?.content) {
+                            fullMessage += data.message.content;
+                            onProgress?.(data.message.content);
                         }
                     }
                 }
@@ -87,9 +164,14 @@ export default class OllamaClient extends ChatClient {
 
             return {
                 message: {
-                    content: reply,
+                    id: messageId,
+                    content: fullMessage,
+                    role: 'assistant',
                 },
+                conversationId: params.conversationId,
+                parentMessageId: params.parentMessageId
             };
+
         } catch (error) {
             console.error('Error in getCompletionStream:', error);
             throw error;
@@ -183,7 +265,7 @@ export default class OllamaClient extends ChatClient {
                 opts.abortController || new AbortController(),
             );
             if (this.options.debug) {
-                // console.debug(JSON.stringify(result));
+                console.debug(JSON.stringify(result));
             }
             reply = result.message.content;
         }
@@ -207,7 +289,6 @@ export default class OllamaClient extends ChatClient {
             conversationId,
             parentId: replyMessage.parentMessageId,
             messageId: replyMessage.id,
-            // messages: conversation.messages,
             response: reply,
             details: result || null,
         };
